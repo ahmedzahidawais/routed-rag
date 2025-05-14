@@ -5,7 +5,8 @@ from fastapi import HTTPException
 import unicodedata
 import asyncio
 import json
-from datetime import datetime
+from .utils import clean_source_text, split_multi_citations
+from datetime import datetime, timezone
 
 logger = setup_logger(__name__)
 
@@ -35,10 +36,11 @@ class RagPipeline:
              "Anweisungen:\n"
              "1. Verwende NUR Informationen aus den angegebenen Quellen.\n"
              "2. Wenn die Quellen nicht ausreichend Informationen bieten, gib das offen zu ('Basierend auf den vorliegenden Quellen...').\n"
-             "3. Zitiere die Quellen in deiner Antwort mit dem Format [Source Name], wie im Kontext gezeigt (z.B. [{source}]).\n"
+             "3. Zitiere die Quellen in deiner Antwort mit dem Format [1], [2], etc. (keine Listen wie [1, 2]).\n"
              "4. Antworte klar, präzise und ausschließlich auf Deutsch.\n"
              "5. Achte SEHR GENAU auf korrekte deutsche Grammatik, Rechtschreibung und Zeichensetzung, INSBESONDERE auf korrekte Leerzeichen.\n"
              "6. Sei hilfreich und freundlich.\n"
+             "7. Vermeide Formulierungen wie 'Basierend auf dem Kontext …, Die Kontextinformationen …' oder ähnliche Aussagen.\n"
              "Antwort:"
              ),
             ("human", "{query}")
@@ -62,7 +64,7 @@ class RagPipeline:
             raise HTTPException(status_code=500, detail="Fehler beim Abrufen relevanter Dokumente.")
 
 
-    def _rerank_documents(self, query, docs, top_n=3, min_docs=2, relevance_threshold=0.1):
+    def _rerank_documents(self, query, docs, top_n=10, min_docs=5, relevance_threshold=0.1):
         """Reranks documents using CrossEncoder."""
         if not docs:
             return []
@@ -77,12 +79,9 @@ class RagPipeline:
             for i, (doc, score) in enumerate(scored_docs):
                  logger.debug(f"Doc {i+1}/{len(scored_docs)} | Score: {score:.4f} | Source: {doc.metadata.get('source', 'N/A')} | Preview: {doc.page_content[:80]}...")
 
-            # More lenient selection criteria
             if scored_docs:
-                # Always take at least the top min_docs, regardless of score
                 filtered_docs = [doc for doc, score in scored_docs[:min_docs]]
                 
-                # If we have more high-scoring documents, include them up to top_n
                 additional_docs = [doc for doc, score in scored_docs[min_docs:top_n] if score > relevance_threshold]
                 filtered_docs.extend(additional_docs)
 
@@ -95,17 +94,19 @@ class RagPipeline:
             logger.error(f"Reranking failed: {e}. Falling back to initial retrieval order.", exc_info=True)
             return docs[:top_n] # Fallback
 
-    def _prepare_context(self, docs) -> str:
-        """Formats the final documents into a context string for the LLM."""
+    def _prepare_context(self, docs):
+        """Formats the final documents into a context string for the LLM and builds a citation map."""
         doc_contexts = []
+        citation_map = {}
         for i, doc in enumerate(docs):
-            source_info = doc.metadata.get('source', f'Quelle {i+1}')
-            # Ensure citation format matches prompt instructions
-            doc_context = f"[{source_info}]: {doc.page_content}"
+            citation_num = str(i + 1)
+            cleaned_content = clean_source_text(doc.page_content)
+            doc_context = f"[{citation_num}]: {cleaned_content}"
             doc_contexts.append(doc_context)
+            citation_map[citation_num] = cleaned_content
         context = "\n\n".join(doc_contexts)
         logger.debug(f"Prepared context:\n{context[:200]}...")
-        return context
+        return context, citation_map
 
     async def _check_answerability(self, query: str, context: str) -> bool:
         """Uses LLM to check if the query can be answered from the context."""
@@ -131,37 +132,43 @@ class RagPipeline:
             logger.error(f"Answerability check failed: {e}. Assuming answerable.", exc_info=True)
             return True # Default to answerable on error to avoid blocking response
 
-    async def generate_response(self, query: str, context: str):
-        """Generates the final response using the LLM, streaming the output."""
+    async def generate_response(self, query: str, context: str, citation_map: dict):
+        """Generates the final response using the LLM, streaming the output, and sends the citation map at the end."""
         logger.info("Generating final response stream...")
         start_time = time.time()
         response_buffer = ""
         try:
             generation_chain = self.answer_template | self.llm
 
-            # Extract source from context (it's in the format [Source Name]: content)
-            source = "Quelle"  # Default source name
-            if context and "[" in context and "]" in context:
-                source = context.split("]")[0].split("[")[1].strip()
+            # Extract sources from context (now numeric)
+            sources = list(citation_map.keys())
 
+            # First, stream the main response
             async for chunk in generation_chain.astream({
                 "context": context,
                 "query": query,
-                "source": source
+                "source": ", ".join(sources) if sources else "Quelle"
             }):
                 chunk_text = chunk.content
                 if chunk_text:
-                    # Minimal processing during streaming for speed
+                    chunk_text = split_multi_citations(chunk_text)
                     normalized_chunk = unicodedata.normalize('NFC', chunk_text)
                     response_buffer += normalized_chunk
                     yield normalized_chunk
                     await asyncio.sleep(0.04)
+
+            
+
+            # Send the citation map as a JSON string with a special marker
+            citation_map_str = f"\n\nCITATION_MAP: {json.dumps(citation_map, ensure_ascii=False)}"
+            yield citation_map_str
+            response_buffer += citation_map_str
+
             duration = time.time() - start_time
             logger.info(f"Finished streaming response. Total generation time: {duration:.2f}s")
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"LLM streaming error after {duration:.2f}s: {e}", exc_info=True)
-            # Only yield error if nothing has been sent yet
             if not response_buffer:
                 yield "Es ist ein Fehler bei der Generierung der Antwort aufgetreten. Bitte versuchen Sie es erneut."
             else:
@@ -171,7 +178,7 @@ class RagPipeline:
         """Saves chat interaction to blob storage."""
         try:
             # Create a unique filename with timestamp
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             filename = f"chat_logs/chat_{timestamp}.json"
             
             # Prepare log data
@@ -220,8 +227,8 @@ class RagPipeline:
                 yield response
                 return
 
-            # 3. Prepare Context
-            context = self._prepare_context(reranked_docs)
+            # 3. Prepare Context and Citation Map
+            context, citation_map = self._prepare_context(reranked_docs)
 
             # 4. Check Answerability
             is_answerable = await self._check_answerability(query, context)
@@ -230,8 +237,8 @@ class RagPipeline:
                 yield response
                 return
 
-            # 5. Generate Response Stream
-            async for chunk in self.generate_response(query, context):
+            # 5. Generate Response Stream (with citation map)
+            async for chunk in self.generate_response(query, context, citation_map):
                 response_buffer += chunk
                 yield chunk
 
@@ -247,4 +254,3 @@ class RagPipeline:
             total_duration = time.time() - start_time_total
             logger.error(f"Request ID: {id(request)} | Unhandled exception during chat processing after {total_duration:.2f}s: {e}", exc_info=True)
             yield "Ein unerwarteter interner Fehler ist aufgetreten. Bitte versuchen Sie es später erneut."
-

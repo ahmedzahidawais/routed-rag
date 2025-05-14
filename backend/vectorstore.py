@@ -1,10 +1,13 @@
 from .logger import setup_logger
 import time
-from .utils import extract_text_from_pdf, clean_text
+from .utils import extract_pdf_blocks
 from langchain_core.documents import Document
 from azure.core.exceptions import AzureError
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain.retrievers import EnsembleRetriever
+from langchain_community.retrievers import BM25Retriever
+from typing import Tuple, Dict
 
 logger = setup_logger(__name__)
 
@@ -26,8 +29,6 @@ class VectorStoreManager:
         processed_files = 0
         failed_files = 0
 
-        # Potential Speed Improvement: Use asyncio for parallel downloads if I/O bound
-        # This requires making this function async and using an async blob client library or thread pool
         for blob in blob_list:
             if blob.name.endswith('.pdf'):
                 logger.debug(f"Processing blob: {blob.name}")
@@ -35,10 +36,11 @@ class VectorStoreManager:
                     blob_client = self.container_client.get_blob_client(blob.name)
                     blob_data = blob_client.download_blob(timeout=120).readall()
 
-                    text = extract_text_from_pdf(blob_data, blob.name)
-                    if text:
-                        cleaned_text = clean_text(text)
-                        docs.append(Document(page_content=cleaned_text, metadata={"source": blob.name}))
+                    text_blocks = extract_pdf_blocks(blob_data, blob.name)
+                    if text_blocks:
+                        # Join the text blocks with newlines to create a single string
+                        combined_text = "\n".join(text_blocks)
+                        docs.append(Document(page_content=combined_text, metadata={"source": blob.name}))
                         processed_files += 1
                     else:
                         logger.warning(f"No text extracted from {blob.name}")
@@ -63,20 +65,20 @@ class VectorStoreManager:
         docs = self._load_pdf_docs_from_blob()
 
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
+            chunk_size=500,
+            chunk_overlap=100
         )
-        chunks = text_splitter.split_documents(docs)
-        logger.info(f"Split {len(docs)} documents into {len(chunks)} chunks.")
+        self.chunks = text_splitter.split_documents(docs)
+        logger.info(f"Split {len(docs)} documents into {len(self.chunks)} chunks.")
 
-        if not chunks:
+        if not self.chunks:
             raise ValueError("Text splitting resulted in zero chunks.")
 
         logger.info("Creating FAISS vector store... This may take some time.")
         start_time = time.time()
         try:
             self.vector_store = FAISS.from_documents(
-                documents=chunks,
+                documents=self.chunks,
                 embedding=self.embedding_model
             )
             duration = time.time() - start_time
@@ -110,10 +112,40 @@ class VectorStoreManager:
         except Exception as e:
             logger.critical(f"Failed to load or create vector store: {e}", exc_info=True)
             raise RuntimeError(f"Could not initialize vector store: {e}")
+        
+    def keyword_search(self):
+        """Creates a BM25 retriever for keyword-based search."""
+        if not hasattr(self, 'chunks'):
+            raise RuntimeError("No chunks available. Please create index first.")
+        texts = [chunk.page_content for chunk in self.chunks]
+        bm25_retriever = BM25Retriever.from_texts(texts)
+        bm25_retriever.k = 5
+        return bm25_retriever
 
     def get_retriever(self, k: int = 5):
-        """Gets the vector store retriever."""
+        """Gets the ensemble retriever combining keyword and vector search."""
         if not self.vector_store:
             raise RuntimeError("Vector store is not initialized.")
-        # Can configure search_type="mmr" (Maximal Marginal Relevance) for diversity
-        return self.vector_store.as_retriever(search_kwargs={'k': k})
+        
+        vector_retriever = self.vector_store.as_retriever(
+            search_type="similarity",
+            search_kwargs={'k': k}
+        )
+        
+        keyword_retriever = self.keyword_search()
+        
+        return EnsembleRetriever(
+            retrievers=[keyword_retriever, vector_retriever],
+            weights=[0.5, 0.5]
+        )
+
+    def _prepare_context(self, docs) -> Tuple[str, Dict[str, str]]:
+        doc_contexts = []
+        citation_map = {}
+        for i, doc in enumerate(docs):
+            citation_num = str(i + 1)
+            doc_context = f"[{citation_num}]: {doc.page_content}"
+            doc_contexts.append(doc_context)
+            citation_map[citation_num] = doc.page_content
+        context = "\n\n".join(doc_contexts)
+        return context, citation_map
