@@ -119,10 +119,10 @@ class VectorStoreManager:
             raise RuntimeError("No chunks available. Please create index first.")
         texts = [chunk.page_content for chunk in self.chunks]
         bm25_retriever = BM25Retriever.from_texts(texts)
-        bm25_retriever.k = 5
+        bm25_retriever.k = 10
         return bm25_retriever
 
-    def get_retriever(self, k: int = 5):
+    def get_retriever(self, k: int = 10):
         """Gets the ensemble retriever combining keyword and vector search."""
         if not self.vector_store:
             raise RuntimeError("Vector store is not initialized.")
@@ -138,7 +138,7 @@ class VectorStoreManager:
             retrievers=[keyword_retriever, vector_retriever],
             weights=[0.5, 0.5]
         )
-
+    
     def _prepare_context(self, docs) -> Tuple[str, Dict[str, str]]:
         doc_contexts = []
         citation_map = {}

@@ -37,8 +37,8 @@ class RagPipeline:
              "1. Verwende NUR Informationen aus den angegebenen Quellen.\n"
              "2. Wenn die Quellen nicht ausreichend Informationen bieten, gib das offen zu ('Basierend auf den vorliegenden Quellen...').\n"
              "3. Zitiere die Quellen in deiner Antwort mit dem Format [1], [2], etc. (keine Listen wie [1, 2]).\n"
-             "4. Antworte klar, präzise und ausschließlich auf Deutsch.\n"
-             "5. Achte SEHR GENAU auf korrekte deutsche Grammatik, Rechtschreibung und Zeichensetzung, INSBESONDERE auf korrekte Leerzeichen.\n"
+             "4. Antworte auf Deutsch.\n"
+             "5. Achte SEHR GENAU auf korrekte Leerzeichen.\n"
              "6. Sei hilfreich und freundlich.\n"
              "7. Vermeide Formulierungen wie 'Basierend auf dem Kontext …, Die Kontextinformationen …' oder ähnliche Aussagen.\n"
              "Antwort:"
@@ -47,9 +47,9 @@ class RagPipeline:
         ])
 
 
-    async def _retrieve_documents(self, query: str, k: int = 5):
+    async def _retrieve_documents(self, query: str):
         """Retrieves initial documents using the vector store."""
-        logger.info(f"Retrieving initial {k} documents for query: '{query[:50]}...'")
+        logger.info(f"Retrieving initial documents for query: '{query[:50]}...'")
         start_time = time.time()
         try:
             initial_docs = self.retriever.get_relevant_documents(query)
@@ -64,7 +64,7 @@ class RagPipeline:
             raise HTTPException(status_code=500, detail="Fehler beim Abrufen relevanter Dokumente.")
 
 
-    def _rerank_documents(self, query, docs, top_n=10, min_docs=5, relevance_threshold=0.1):
+    def _rerank_documents(self, query, docs, top_n=10, min_docs=7, relevance_threshold=0.05):
         """Reranks documents using CrossEncoder."""
         if not docs:
             return []

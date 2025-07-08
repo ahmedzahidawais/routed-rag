@@ -18,7 +18,7 @@ def initialize_llm():
             deployment_name="gpt-4o-mini",
             api_version="2024-12-01-preview",
             streaming=True,
-            temperature=0
+            temperature=0.5
         )
         logger.info("Successfully initialized Azure OpenAI LLM")
         return llm
