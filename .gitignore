@@ -11,10 +11,7 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
-# Dependencies
-node_modules/
-/.pnp
-.pnp.js
+
 
 # Python virtual environment
 .venv/
