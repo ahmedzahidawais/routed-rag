@@ -4,8 +4,7 @@ import { FiSend } from 'react-icons/fi';
 
 // --- Configuration ---
 // Make sure this matches your deployed backend URL
-const API_BASE_URL = 'https://rag-chatbot-api.azurewebsites.net/';
-const PASSWORD = import.meta.env.VITE_APP_PASSWORD || 'default_password'; // Use environment variab
+const API_BASE_URL = 'http://localhost:8000';
 interface Message {
   id: string; // Add unique ID for key prop
   text: string;
@@ -15,144 +14,33 @@ interface Message {
 
 // --- Text Formatting (Simplified) ---
 
-// Citation hover component with dynamic positioning
-const CitationTooltip = ({ number, content }: { number: string; content: string }) => {
-  const [show, setShow] = useState(false);
-  const [position, setPosition] = useState<'top' | 'bottom'>('top');
-  const [coords, setCoords] = useState({ left: 0, top: 0 });
-  const ref = useRef<HTMLSpanElement>(null);
-  const tooltipRef = useRef<HTMLDivElement>(null);
+// Citations disabled in simplified app
 
-  useEffect(() => {
-    if (show && ref.current && tooltipRef.current) {
-      const rect = ref.current.getBoundingClientRect();
-      const tooltipRect = tooltipRef.current.getBoundingClientRect();
-      const spaceAbove = rect.top;
-      const spaceBelow = window.innerHeight - rect.bottom;
-      let newPosition: 'top' | 'bottom' = 'top';
-      let top = rect.top - tooltipRect.height - 8; // 8px margin
-      if (spaceBelow > tooltipRect.height + 16) {
-        newPosition = 'bottom';
-        top = rect.bottom + 8;
-      } else if (spaceAbove > tooltipRect.height + 16) {
-        newPosition = 'top';
-        top = rect.top - tooltipRect.height - 8;
-      } else {
-        // Default to bottom, but clamp to viewport
-        newPosition = 'bottom';
-        top = Math.min(rect.bottom + 8, window.innerHeight - tooltipRect.height - 8);
-      }
-      setPosition(newPosition);
-      setCoords({
-        left: rect.left + rect.width / 2,
-        top,
-      });
-    }
-  }, [show]);
+// Citations disabled in simplified app
+const extractCitationMap = (_text: string): { [key: string]: string } => ({})
 
-  return (
-    <span
-      ref={ref}
-      className="text-blue-600 cursor-help hover:text-blue-800 relative"
-      onMouseEnter={() => setShow(true)}
-      onMouseLeave={() => setShow(false)}
-    >
-      [{number}]
-      {show && (
-        <div
-          ref={tooltipRef}
-          className="fixed z-[1000] bg-white p-4 rounded-lg shadow-xl min-w-[300px] max-w-[500px] max-h-[400px] border border-gray-200 overflow-y-auto"
-          style={{
-            left: coords.left,
-            top: coords.top,
-            transform: 'translateX(-50%)',
-          }}
-        >
-          <div className="text-sm text-gray-700 whitespace-pre-wrap break-words leading-relaxed">
-            {content}
-          </div>
-          {/* Arrow */}
-          <div
-            className={`absolute left-1/2 ${position === 'top' ? 'top-full' : 'bottom-full'} transform -translate-x-1/2 ${position === 'top' ? '' : ''}`}
-            style={{ width: 16, height: 16 }}
-          >
-            <div
-              className="w-4 h-4 bg-white border-r border-b border-gray-200"
-              style={{ transform: 'rotate(45deg)', marginTop: position === 'top' ? 0 : -8, marginBottom: position === 'top' ? -8 : 0 }}
-            />
-          </div>
-        </div>
-      )}
-    </span>
-  );
-};
-
-// Function to parse the citation map from the response
-const extractCitationMap = (text: string): { [key: string]: string } => {
-  const match = text.match(/\n\nCITATION_MAP: (\{[\s\S]*\})/);
-  if (match) {
-    try {
-      return JSON.parse(match[1]);
-    } catch {
-      return {};
-    }
-  }
-  return {};
-};
-
-// Function to format text with citations
-const formatText = (text: string, citationMap?: { [key: string]: string }) => {
-  // Remove the citation map marker from the text
-  const cleanText = text.replace(/\n\nCITATION_MAP: (\{[\s\S]*\})/, '');
-  const [mainContent, sources] = cleanText.split('\n\nQuellen:');
-  const paragraphs = mainContent
+// Function to format plain text
+const formatText = (text: string) => {
+  const paragraphs = text
     .split(/\n+/)
     .map(p => p.trim())
     .filter(p => p.length > 0);
 
-  // Function to process text with citations
-  const processTextWithCitations = (text: string) => {
-    const parts = text.split(/(\[\d+\])/g);
-    return parts.map((part, i) => {
-      const citationMatch = part.match(/\[(\d+)\]/);
-      if (citationMatch && citationMap && citationMap[citationMatch[1]]) {
-        return (
-          <CitationTooltip
-            key={i}
-            number={citationMatch[1]}
-            content={citationMap[citationMatch[1]]}
-          />
-        );
-      }
-      return part;
-    });
-  };
-
   return (
     <div className="space-y-3">
-      {paragraphs.map((paragraph, i) => (
-        <p key={i}>{processTextWithCitations(paragraph)}</p>
-      ))}
-      {sources && (
-        <div className="mt-4 pt-2 border-t border-gray-200">
-          <p className="text-sm text-gray-600">
-            <strong>Quellen:</strong> {sources.trim()}
-          </p>
-        </div>
-      )}
+      {paragraphs.map((paragraph, i) => <p key={i}>{paragraph}</p>)}
     </div>
   );
 };
 
 // --- Main App Component ---
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [password, setPassword] = useState('');
   const [inputMessage, setInputMessage] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null); // Ref for scrolling
+  const textareaRef = useRef<HTMLTextAreaElement>(null); // Ref for auto-resize
 
   // Scroll to bottom effect
   useEffect(() => {
@@ -170,17 +58,13 @@ function App() {
     return () => document.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    // Basic password check (consider more secure methods for production)
-    if (password === PASSWORD) {
-      setIsAuthenticated(true);
-      setError('');
-      setPassword(''); // Clear password field after successful login
-    } else {
-      setError('Incorrect password');
+  // Auto-resize textarea when inputMessage changes
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
     }
-  };
+  }, [inputMessage]);
 
   const handleSendMessage = async () => {
     const trimmedMessage = inputMessage.trim();
@@ -255,42 +139,6 @@ function App() {
 
   // --- Render Logic ---
 
-  // Login Screen
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-        <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-sm">
-          <h2 className="text-2xl font-bold text-gray-800 mb-6 text-center">Chat Login</h2>
-          <form onSubmit={handleLogin}>
-            <div className="mb-4">
-              <label htmlFor="password" className="block text-gray-700 text-sm font-bold mb-2">
-                Password
-              </label>
-              <input
-                type="password"
-                id="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="Enter password"
-                required // Make password required
-              />
-            </div>
-            {error && (
-              <p className="text-red-600 text-sm mb-4 text-center">{error}</p>
-            )}
-            <button
-              type="submit"
-              className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition duration-150 ease-in-out"
-            >
-              Login
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
   // Chat Interface
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 flex flex-col">
@@ -320,10 +168,10 @@ function App() {
                  style={{ wordBreak: 'break-word' }} // Keep word-break as safety
               >
                 {message.isUser ? (
-                  <p>{message.text}</p> // Simple text for user
+                  <p style={{ whiteSpace: 'pre-wrap' }}>{message.text}</p> // Preserve newlines for user messages
                 ) : (
                   message.text ? (
-                    formatText(message.text, message.citationMap)
+                    formatText(message.text)
                   ) : (
                     <span className="italic text-gray-500">Generiere Antwort...</span>
                   )
@@ -338,14 +186,22 @@ function App() {
         {/* Input Area */}
         <div className="bg-white rounded-lg shadow-lg p-3 sm:p-4 sticky bottom-4 "> {/* Made input sticky */}
           <div className="flex items-center gap-2 sm:gap-3">
-            <input
-              type="text"
+            <textarea
+              ref={textareaRef}
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage();
+                }
+                // Shift+Enter will insert a newline by default
+              }}
               placeholder="Ask something..."
-              className="flex-1 rounded-full border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent text-sm sm:text-base"
+              className="flex-1 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent text-sm sm:text-base"
               disabled={isLoading} // Disable input while loading
+              rows={1}
+              style={{ overflow: 'hidden', resize: 'none', maxHeight: 200 }} // Auto-resize, limit max height
             />
             <button
               onClick={handleSendMessage}

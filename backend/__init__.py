@@ -1,1 +1,3 @@
-# This file makes the backend directory a Python package 
+"""Backend package initializer."""
+
+__all__: list[str] = []

@@ -1,0 +1,8 @@
+{
+  "timestamp": "2025-09-28T18:12:39.789122",
+  "query": "What's the current weather in Paris?",
+  "response": "The current weather in Paris is few clouds, with a temperature of 16.8°C, humidity at 66%, and wind speed of 1.5 m/s.",
+  "context": "",
+  "processing_time_seconds": 5.497283935546875,
+  "model": "gpt-4o-mini"
+}

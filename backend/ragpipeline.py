@@ -2,57 +2,47 @@ from langchain_core.prompts import ChatPromptTemplate
 from .logger import setup_logger
 import time
 from fastapi import HTTPException
-import unicodedata
-import asyncio
 import json
-from .utils import clean_source_text, split_multi_citations
 from datetime import datetime, timezone
+from .weather import WeatherClient
+import os
 
 logger = setup_logger(__name__)
 
 
 class RagPipeline:
-    def __init__(self, llm, retriever, cross_encoder, container_client):
+    def __init__(self, llm, retriever, vector_manager=None):
         self.llm = llm
         self.retriever = retriever
-        self.cross_encoder = cross_encoder
-        self.container_client = container_client
+        self.weather_client = WeatherClient()
+        self.vector_manager = vector_manager
         self._setup_prompts()
 
     def _setup_prompts(self):
         """Initializes Langchain prompt templates."""
-        # Verification Prompt (Simplified)
-        self.verification_template = ChatPromptTemplate([
-            ("system", "Du bist ein Informationsbewerter. Basierend NUR auf diesen Quellen:\n{context}\nKann die Frage '{query}' zumindest teilweise beantwortet werden? Antworte nur mit 'Ja' oder 'Nein'."),
-        ])
-
-        # Answer Generation Prompt
         self.answer_template = ChatPromptTemplate([
             ("system",
-             "Du bist ein hilfreicher Assistent für deutschsprachige Nutzer. "
-             "Beantworte die Frage NUR auf Basis der folgenden verifizierten Quellen:\n\n"
-             "{context}\n\n"
-             "Frage: {query}\n\n"
-             "Anweisungen:\n"
-             "1. Verwende NUR Informationen aus den angegebenen Quellen.\n"
-             "2. Wenn die Quellen nicht ausreichend Informationen bieten, gib das offen zu ('Basierend auf den vorliegenden Quellen...').\n"
-             "3. Zitiere die Quellen in deiner Antwort mit dem Format [1], [2], etc. (keine Listen wie [1, 2]).\n"
-             "4. Antworte auf Deutsch.\n"
-             "5. Achte SEHR GENAU auf korrekte Leerzeichen.\n"
-             "6. Sei hilfreich und freundlich.\n"
-             "7. Vermeide Formulierungen wie 'Basierend auf dem Kontext …, Die Kontextinformationen …' oder ähnliche Aussagen.\n"
-             "Antwort:"
-             ),
-            ("human", "{query}")
+             "You are a helpful assistant. Answer the user's question using the provided context when relevant. "
+             "If the context does not help, still answer concisely based on your general knowledge. "
+             "Keep answers short and clear.\n\nContext:\n{context}"),
+            ("human", "Question: {query}")
         ])
 
 
     async def _retrieve_documents(self, query: str):
-        """Retrieves initial documents using the vector store."""
+        """Retrieves documents using the vector store (simple similarity)."""
         logger.info(f"Retrieving initial documents for query: '{query[:50]}...'")
         start_time = time.time()
         try:
-            initial_docs = self.retriever.get_relevant_documents(query)
+            retriever = None
+            if self.vector_manager is not None:
+                try:
+                    retriever = self.vector_manager.get_retriever(k=5)
+                except Exception:
+                    retriever = None
+            if retriever is None:
+                retriever = self.retriever
+            initial_docs = retriever.get_relevant_documents(query)
 
             duration = time.time() - start_time
             logger.info(f"Retrieved {len(initial_docs)} documents in {duration:.2f}s")
@@ -61,143 +51,28 @@ class RagPipeline:
             return initial_docs
         except Exception as e:
             logger.error(f"Document retrieval failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Fehler beim Abrufen relevanter Dokumente.")
+            raise HTTPException(status_code=500, detail="Failed to retrieve relevant documents.")
 
-
-    def _rerank_documents(self, query, docs, top_n=10, min_docs=7, relevance_threshold=0.05):
-        """Reranks documents using CrossEncoder."""
-        if not docs:
-            return []
-
-        logger.info(f"Reranking {len(docs)} documents...")
-        start_time = time.time()
-        try:
-            document_pairs = [(query, doc.page_content) for doc in docs]
-            relevance_scores = self.cross_encoder.predict(document_pairs, show_progress_bar=False)
-            scored_docs = sorted(zip(docs, relevance_scores), key=lambda x: x[1], reverse=True)
-
-            for i, (doc, score) in enumerate(scored_docs):
-                 logger.debug(f"Doc {i+1}/{len(scored_docs)} | Score: {score:.4f} | Source: {doc.metadata.get('source', 'N/A')} | Preview: {doc.page_content[:80]}...")
-
-            if scored_docs:
-                filtered_docs = [doc for doc, score in scored_docs[:min_docs]]
-                
-                additional_docs = [doc for doc, score in scored_docs[min_docs:top_n] if score > relevance_threshold]
-                filtered_docs.extend(additional_docs)
-
-            duration = time.time() - start_time
-            final_scores = [score for _, score in scored_docs[:len(filtered_docs)]]
-            logger.info(f"Reranking finished in {duration:.2f}s. Selected {len(filtered_docs)} documents with scores: {[f'{s:.2f}' for s in final_scores]}")
-            return filtered_docs
-
-        except Exception as e:
-            logger.error(f"Reranking failed: {e}. Falling back to initial retrieval order.", exc_info=True)
-            return docs[:top_n] # Fallback
-
-    def _prepare_context(self, docs):
-        """Formats the final documents into a context string for the LLM and builds a citation map."""
-        doc_contexts = []
-        citation_map = {}
-        for i, doc in enumerate(docs):
-            citation_num = str(i + 1)
-            cleaned_content = clean_source_text(doc.page_content)
-            doc_context = f"[{citation_num}]: {cleaned_content}"
-            doc_contexts.append(doc_context)
-            citation_map[citation_num] = cleaned_content
-        context = "\n\n".join(doc_contexts)
-        logger.debug(f"Prepared context:\n{context[:200]}...")
-        return context, citation_map
-
-    async def _check_answerability(self, query: str, context: str) -> bool:
-        """Uses LLM to check if the query can be answered from the context."""
-        if not context:
-            logger.warning("Cannot check answerability: Context is empty.")
-            return False
-
-        logger.info("Checking answerability...")
-        start_time = time.time()
-        try:
-            verification_chain = self.verification_template | self.llm
-            # Use ainvoke for single, non-streaming call
-            response = await verification_chain.ainvoke({"context": context, "query": query})
-            answer_text = response.content.strip().lower()
-            duration = time.time() - start_time
-            logger.debug(f"Answerability raw response: '{answer_text}' (took {duration:.2f}s)")
-
-            is_answerable = "ja" in answer_text or "yes" in answer_text
-
-            logger.info(f"Answerability check result: {is_answerable}")
-            return is_answerable
-        except Exception as e:
-            logger.error(f"Answerability check failed: {e}. Assuming answerable.", exc_info=True)
-            return True # Default to answerable on error to avoid blocking response
-
-    async def generate_response(self, query: str, context: str, citation_map: dict):
-        """Generates the final response using the LLM, streaming the output, and sends the citation map at the end."""
-        logger.info("Generating final response stream...")
-        start_time = time.time()
-        response_buffer = ""
-        try:
-            generation_chain = self.answer_template | self.llm
-
-            # Extract sources from context (now numeric)
-            sources = list(citation_map.keys())
-
-            # First, stream the main response
-            async for chunk in generation_chain.astream({
-                "context": context,
-                "query": query,
-                "source": ", ".join(sources) if sources else "Quelle"
-            }):
-                chunk_text = chunk.content
-                if chunk_text:
-                    chunk_text = split_multi_citations(chunk_text)
-                    normalized_chunk = unicodedata.normalize('NFC', chunk_text)
-                    response_buffer += normalized_chunk
-                    yield normalized_chunk
-                    await asyncio.sleep(0.04)
-
-            
-
-            # Send the citation map as a JSON string with a special marker
-            citation_map_str = f"\n\nCITATION_MAP: {json.dumps(citation_map, ensure_ascii=False)}"
-            yield citation_map_str
-            response_buffer += citation_map_str
-
-            duration = time.time() - start_time
-            logger.info(f"Finished streaming response. Total generation time: {duration:.2f}s")
-        except Exception as e:
-            duration = time.time() - start_time
-            logger.error(f"LLM streaming error after {duration:.2f}s: {e}", exc_info=True)
-            if not response_buffer:
-                yield "Es ist ein Fehler bei der Generierung der Antwort aufgetreten. Bitte versuchen Sie es erneut."
-            else:
-                pass
 
     async def _save_chat_log(self, query: str, response: str, context: str, duration: float):
-        """Saves chat interaction to blob storage."""
+        """Saves chat interaction to local file storage."""
         try:
-            # Create a unique filename with timestamp
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            filename = f"chat_logs/chat_{timestamp}.json"
             
-            # Prepare log data
+            os.makedirs("chat_logs", exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join("chat_logs", f"chat_{timestamp}.json")
+
             log_data = {
                 "timestamp": datetime.utcnow().isoformat(),
                 "query": query,
                 "response": response,
                 "context": context,
                 "processing_time_seconds": duration,
-                "model": self.llm.model_name if hasattr(self.llm, 'model_name') else "unknown"
+                "model": getattr(self.llm, 'model', getattr(self.llm, 'model_name', 'unknown')),
             }
-            
-            # Convert to JSON and upload
-            log_json = json.dumps(log_data, ensure_ascii=False, indent=2)
-            self.container_client.upload_blob(
-                name=filename,
-                data=log_json,
-                overwrite=True
-            )
+
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(json.dumps(log_data, ensure_ascii=False, indent=2))
             logger.info(f"Chat log saved to {filename}")
         except Exception as e:
             logger.error(f"Failed to save chat log: {e}", exc_info=True)
@@ -207,50 +82,90 @@ class RagPipeline:
         start_time_total = time.time()
         query = request.message.strip()
         if not query:
-            raise HTTPException(status_code=400, detail="Nachricht darf nicht leer sein")
+            raise HTTPException(status_code=400, detail="Message must not be empty")
 
         logger.info(f"Processing request ID: {id(request)} | Query: '{query[:100]}...'")
         response_buffer = ""
 
         try:
-            # 1. Retrieve
-            initial_docs = await self._retrieve_documents(query)
-            if not initial_docs:
-                response = "Ich konnte leider keine relevanten Dokumente zu Ihrer Anfrage finden."
-                yield response
-                return
+            router = ChatPromptTemplate([
+                ("system", "You are a router. Reply with exactly one token: weather | rag | both. "
+                           "Choose 'both' if the user asks about places from the book and also current conditions."),
+                ("human", "Question: {query}")
+            ]) | self.llm
+            try:
+                r = await router.ainvoke({"query": query})
+                label = (r.content or "").strip().lower()
+                if "both" in label:
+                    decision = {"use_weather": True, "use_retriever": True}
+                elif "weather" in label:
+                    decision = {"use_weather": True, "use_retriever": False}
+                elif "rag" in label:
+                    decision = {"use_weather": False, "use_retriever": True}
+                else:
+                    raise ValueError("Unrecognized label")
+            except Exception:
+                lowered = query.lower()
+                decision = {"use_weather": any(k in lowered for k in ["weather","forecast","temperature","rain","wind","humid","snow"]), "use_retriever": True}
 
-            # 2. Rerank
-            reranked_docs = self._rerank_documents(query, initial_docs)
-            if not reranked_docs:
-                response = "Nach Prüfung der gefundenen Dokumente scheinen diese nicht relevant genug für Ihre Anfrage zu sein."
-                yield response
-                return
+            weather_text = ""
+            if decision.get("use_weather"):
+                try:
+                    weather_text, _ = await self.weather_client.get_weather_answer(query)
+                except Exception:
+                    weather_text = ""
 
-            # 3. Prepare Context and Citation Map
-            context, citation_map = self._prepare_context(reranked_docs)
+            rag_context = ""
+            places: list[str] = []
+            if decision.get("use_retriever"):
+                docs = await self._retrieve_documents(query)
+                if docs:
+                    rag_context = "\n\n".join([d.page_content for d in docs])
+                    extract_places = ChatPromptTemplate([
+                        ("system", "Extract a JSON array of up to 5 Italian city names mentioned in the context that relate to Mark Twain's travels. Reply with only JSON array, e.g., [\"Rome\", \"Florence\"]. If none, reply []."),
+                        ("human", "Context:\n{ctx}")
+                    ]) | self.llm
+                    try:
+                        resp = await extract_places.ainvoke({"ctx": rag_context[:6000]})
+                        parsed = json.loads((resp.content or "[]").strip())
+                        if isinstance(parsed, list):
+                            places = [str(p) for p in parsed][:5]
+                    except Exception:
+                        places = []
 
-            # 4. Check Answerability
-            is_answerable = await self._check_answerability(query, context)
-            if not is_answerable:
-                response = "Basierend auf den verfügbaren Informationen kann ich Ihre Frage leider nicht direkt beantworten. Vielleicht können Sie Ihre Frage umformulieren?"
-                yield response
-                return
+            # If both: fetch weather for extracted places and add to weather_text
+            if decision.get("use_weather") and places:
+                lines = []
+                for p in places:
+                    try:
+                        line = await self.weather_client.get_weather_for_city(p)
+                        lines.append(line)
+                    except Exception:
+                        continue
+                if lines:
+                    weather_text = (weather_text + "\n\n" if weather_text else "") + "\n".join(lines)
 
-            # 5. Generate Response Stream (with citation map)
-            async for chunk in self.generate_response(query, context, citation_map):
-                response_buffer += chunk
-                yield chunk
+            compose = ChatPromptTemplate([
+                ("system", "You are a helpful assistant. If weather facts are provided, include them. If document context is provided, summarize the places and relevant details briefly. Keep the final answer concise and useful."),
+                ("human", "Question: {query}\n\nWeather facts (optional):\n{weather}\n\nDocument context (optional):\n{context}")
+            ]) | self.llm
+
+            async for chunk in compose.astream({"query": query, "weather": weather_text, "context": rag_context}):
+                text = chunk.content
+                if text:
+                    response_buffer += text
+                    yield text
 
             total_duration = time.time() - start_time_total
             logger.info(f"Request ID: {id(request)} | Successfully processed in {total_duration:.2f}s")
 
             # Save chat log after successful response
-            await self._save_chat_log(query, response_buffer, context, total_duration)
+            context_for_log = ""
+            await self._save_chat_log(query, response_buffer, context_for_log, total_duration)
 
         except HTTPException:
             raise
         except Exception as e:
             total_duration = time.time() - start_time_total
             logger.error(f"Request ID: {id(request)} | Unhandled exception during chat processing after {total_duration:.2f}s: {e}", exc_info=True)
-            yield "Ein unerwarteter interner Fehler ist aufgetreten. Bitte versuchen Sie es später erneut."
+            yield "An unexpected internal error occurred. Please try again later."

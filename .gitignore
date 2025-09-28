@@ -23,21 +23,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-*.tfvars
-variables.tf
-*.tfvars.json
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-.terraformrc
-terraform.rc
-.terraform.lock.hcl
-terraform.tfstate.lock.info
 
 # Build output
 /dist

@@ -4,13 +4,19 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-# Now, fetch your keys from the environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
-AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-CONTAINER_NAME = os.getenv("CONTAINER_NAME")
-FAISS_INDEX_PATH = os.getenv("FAISS_INDEX_PATH")
+# Persistent local vector store (Chroma)
+CHROMA_DB_DIR = os.getenv("CHROMA_DB_DIR", os.path.join("chroma_db"))
 
-if not all([AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_STORAGE_CONNECTION_STRING]):
-    raise ValueError("One or more environment variables are missing.")
+# Assignment-specific config
+GUTENBERG_BOOK_URL = os.getenv(
+    "GUTENBERG_BOOK_URL",
+    # Mark Twain - The Innocents Abroad (Project Gutenberg plain text)
+    "https://www.gutenberg.org/cache/epub/3176/pg3176.txt",
+)
+
+OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
+

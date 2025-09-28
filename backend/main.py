@@ -5,13 +5,11 @@ from pydantic import BaseModel
 from .services import (
     initialize_llm,
     initialize_embedding,
-    initialize_blob_service,
-    initialize_cross_encoder
 )
 from .vectorstore import VectorStoreManager
 from .ragpipeline import RagPipeline
 from .logger import setup_logger
-from config import FAISS_INDEX_PATH
+from config import CHROMA_DB_DIR
 
 logger = setup_logger(__name__)
 
@@ -25,22 +23,22 @@ try:
     logger.info("Starting application initialization...")
     llm = initialize_llm()
     embedding_model = initialize_embedding()
-    blob_service_client, container_client = initialize_blob_service()
-    cross_encoder = initialize_cross_encoder()
+    container_client = None
 
     # Initialize Vector Store (Loads or Creates Index)
     vector_store_manager = VectorStoreManager(
-        container_client=container_client,
+        container_client=None,
         embedding_model=embedding_model,
-        index_path=FAISS_INDEX_PATH
+        index_path=CHROMA_DB_DIR
     )
+    # Force index build at startup so retriever is ready
+    vector_store_manager.build_index(force=True)
     retriever = vector_store_manager.get_retriever(k=5)
 
     rag_pipeline_instance = RagPipeline(
         llm=llm,
         retriever=retriever,
-        cross_encoder=cross_encoder,
-        container_client=container_client
+        vector_manager=vector_store_manager
     )
     logger.info("Application components initialized successfully.")
 
@@ -49,8 +47,6 @@ except RuntimeError as init_err:
     rag_pipeline_instance = None
 
 
-# --- Core Chat Processing Function ---
-# This is the function app.py will call
 async def process_chat_request(request: ChatRequest) -> AsyncGenerator[str, None]:
     """
      Handles request processing and streams the response via RAG pipeline.
@@ -69,7 +65,6 @@ async def process_chat_request(request: ChatRequest) -> AsyncGenerator[str, None
         return
 
     try:
-        # Stream the response directly from the pipeline instance's method
         async for chunk in rag_pipeline_instance.process_chat(request):  # Call the method
             yield chunk
     except HTTPException as http_exc:
